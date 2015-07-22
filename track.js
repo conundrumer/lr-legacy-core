@@ -2,25 +2,24 @@
  * contains the rider and track lines
  * acts as line storage and physics sim
  */
+'use strict';
 
 var _ = require('lodash');
 
-// var Line = require('./line');
-var Line = require('./line');
-var
-  LINE = Line.LINE,
-  SolidLine = Line.SolidLine,
-  AccLine = Line.AccLine,
-  SceneryLine = Line.SceneryLine;
+var {
+  LineStore,
+  GridStore,
+  OldGridStore
+} = require('./line-store');
 
-var Rider = require('./rider');
+var {
+  LINE,
+  SolidLine,
+  AccLine,
+  SceneryLine
+} = require('./line');
 
-var Store = require('./line-store');
-var
-  LineStore = Store.LineStore,
-  GridStore = Store.GridStore,
-  OldGridStore = Store.OldGridStore;
-
+var {Rider, DebugRider} = require('./rider');
 
 /* Track
  * revision 6.2
@@ -38,8 +37,8 @@ var
  * - store
  */
 class Track {
-  constructor(lineData, startPosition, debug) {
-    this.debug = debug || false;
+  constructor(lineData, startPosition, debug = false) {
+    this.debug = debug;
 
     this.startPosition = startPosition || { x: 0, y: 0 };
     this.resetFrameCache();
@@ -52,7 +51,8 @@ class Track {
   set startPosition(pos) {
     this.startX = pos.x;
     this.startY = pos.y;
-    this.initRider = new Rider(pos.x, pos.y, null, null, this.debug);
+    this.rider = new (this.debug ? DebugRider : Rider)(pos.x, pos.y);
+    this.initRiderState = this.rider.getState();
   }
 
   get startPosition() {
@@ -103,22 +103,21 @@ class Track {
   }
 
   getRiderAtFrame(frameNum) {
-    if (this.frameCache[frameNum]) {
-      return this.frameCache[frameNum];
+    if (frameNum < this.frameCache.length) {
+      let riderState = this.frameCache[frameNum];
+      this.rider.setState(riderState);
+      return this.rider;
     }
 
-    let rider;
-
+    this.rider.setState(_.last(this.frameCache));
     for (let i = this.frameCache.length; i <= frameNum; i++) {
-      // make a copy
-      rider = this.frameCache[i-1].clone();
 
-      rider.step(this.store);
+      this.rider.step(this.store);
 
-      this.frameCache[i] = rider;
+      this.frameCache[i] = this.rider.getState();
     }
 
-    return rider;
+    return this.rider;
   }
 
   updateFrameCache(line, removed) {
@@ -130,7 +129,7 @@ class Track {
   }
 
   resetFrameCache() {
-    this.frameCache = [ this.initRider ];
+    this.frameCache = [ this.initRiderState ];
   }
 
   getNewStore() {

@@ -3,6 +3,30 @@
  */
 'use strict';
 
+var Vector = require('./vector');
+var _ = require('lodash');
+
+class Entity {
+
+  constructor(id) {
+    this.id = id;
+    this.init = this;
+  }
+
+  clone(...copyStateArgs) {
+    return _.create(this.init, this.copyState(...copyStateArgs));
+  }
+
+  copyState() {
+    throw new Error('not implemented');
+  }
+
+  setState() {
+    throw new Error('not implemented');
+  }
+
+}
+
 /* Point
  *
  * public:
@@ -16,34 +40,68 @@
  * - dx
  * - dy
  */
-class Point {
+class Point extends Entity {
 
-  constructor(x, y, friction, airFriction) {
+  constructor(id, x, y, friction = 0, airFriction = 1) {
+    super(id);
 
-    // TODO: should I use point IDs???
-    // this.id = id++; // debug
+    this.pos = new Vector(x, y);
+    this.prevPos = new Vector(x, y);
+    this.vel = new Vector(0, 0);
 
-    // position
-    this.x = x;
-    this.y = y;
-    // velocity
-    this.dx = 0;
-    this.dy = 0;
-    // previous position for inertia
-    this.vx = x;
-    this.vy = y;
+    this.friction = friction;
+    this.airFriction = airFriction;
+  }
 
-    this.friction = friction || 0;
-    this.airFriction = (airFriction !== undefined) ? airFriction : 1;
+  get x() {
+    return this.pos.x;
+  }
+
+  get y() {
+    return this.pos.y;
   }
 
   step(gravity) {
-    this.dx = (this.x - this.vx) * this.airFriction + gravity.x;
-    this.dy = (this.y - this.vy) * this.airFriction + gravity.y;
-    this.vx = this.x;
-    this.vy = this.y;
-    this.x += this.dx;
-    this.y += this.dy;
+    this.vel.set(this.pos).subtract(this.prevPos).mulS(this.airFriction).add(gravity);
+    this.prevPos.set(this.pos);
+    this.pos.add(this.vel);
+  }
+
+  copyState() {
+    return {
+      pos: this.pos.clone(),
+      prevPos: this.prevPos.clone(),
+      vel: this.vel.clone()
+    };
+  }
+
+  setState(state) {
+    this.pos.set(state.pos);
+    this.prevPos.set(state.prevPos);
+    this.vel.set(state.vel);
+  }
+
+}
+
+class Constraint extends Entity {
+
+  shouldCrash(crashed) {
+    return crashed;
+  }
+
+  shouldResolve() {
+    return true;
+  }
+
+  doResolve() {
+    throw new Error('Not implemented');
+  }
+
+  resolve(crashed) {
+    if (this.shouldResolve(crashed)) {
+      this.doResolve();
+    }
+    return this.shouldCrash(crashed);
   }
 
 }
@@ -58,56 +116,53 @@ class Point {
  * - q
  * - restLength
  */
-class Stick {
+class Stick extends Constraint {
 
-  constructor (p, q) {
+  constructor (id, p, q) {
+    super(id);
+
     this.p = p;
     this.q = q;
     this.restLength = this.length;
-  }
 
-  get dx() {
-    return this.p.x - this.q.x;
-  }
-
-  get dy() {
-    return this.p.y - this.q.y;
+    // hmmmmmm should i bother with avoiding creation of vectors?
+    this.tempVec = new Vector(0, 0);
   }
 
   get length() {
-    let dx = this.dx;
-    let dy = this.dy;
-    return Math.sqrt(dx * dx + dy * dy);
+    return this.p.pos.distance(this.q.pos);
   }
 
   get diff() {
-    return (this.length - this.restLength) / this.length * 0.5;
+    let length = this.length;
+    // prevent division by zero
+    // this will allow interesting behavior but w/e
+    if (length === 0) {
+      return 0;
+    }
+    return (length - this.restLength) / length * 0.5;
   }
 
-  // set dx(x) {}, set dy(x) {}, set length(x) {}, set diff(x) {},
-
-  shouldCrash(crashed) {
-    return crashed;
+  getVector() {
+    return this.tempVec.set(this.p.pos).subtract(this.q.pos);
   }
 
-  shouldResolve() {
-    return true;
+  getDelta() {
+    return this.getVector().mulS(this.diff);
   }
 
   doResolve() {
-    let dx = this.dx * this.diff;
-    let dy = this.dy * this.diff;
-    this.p.x -= dx;
-    this.p.y -= dy;
-    this.q.x += dx;
-    this.q.y += dy;
+    let delta = this.getDelta();
+    this.p.pos.subtract(delta);
+    this.q.pos.add(delta);
   }
 
-  resolve(crashed) {
-    if (this.shouldResolve(crashed)) {
-      this.doResolve();
-    }
-    return this.shouldCrash(crashed);
+  copyState(p, q) {
+    return {
+      p: p || this.p.clone(),
+      q: q || this.q.clone(),
+      tempVec: new Vector(0, 0)
+    };
   }
 
 }
@@ -125,8 +180,8 @@ class Stick {
  */
 class BindStick extends Stick {
 
-  constructor(p, q, endurance) {
-    super(p, q);
+  constructor(id, p, q, endurance) {
+    super(id, p, q);
     this.endurance = endurance * this.restLength * 0.5;
   }
 
@@ -171,16 +226,55 @@ class RepelStick extends Stick {
 class ScarfStick extends Stick {
 
   doResolve() {
-    this.q.x += this.dx * this.diff * 2;
-    this.q.y += this.dy * this.diff * 2;
+    let delta = this.getDelta().mulS(2);
+    this.q.pos.add(delta);
+  }
+
+}
+
+class Joint extends Constraint {
+
+  constructor(id, s, t, p = null) {
+    super(id);
+
+    this.s = s;
+    this.t = t;
+    this.p = p;
+  }
+
+  copyState(s, t, p) {
+    return {
+      s: s || this.s.clone(),
+      t: t || this.t.clone(),
+      p: p || this.p ? this.p.clone() : null
+    };
+  }
+
+}
+
+// allow kramuals
+class ClockwiseCrashJoint extends Joint {
+
+  isClockwise() {
+    return this.s.getVector().cross(this.t.getVector()) >= 0;
+  }
+
+  shouldResolve() {
+    return false;
+  }
+
+  shouldCrash(crashed) {
+    return crashed || !this.isClockwise();
   }
 
 }
 
 module.exports = {
-  Point: Point,
-  Stick: Stick,
-  BindStick: BindStick,
-  RepelStick: RepelStick,
-  ScarfStick: ScarfStick
+  Entity,
+  Point,
+  Stick,
+  BindStick,
+  RepelStick,
+  ScarfStick,
+  ClockwiseCrashJoint
 };
